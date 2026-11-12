@@ -268,6 +268,10 @@
   .rm:hover{opacity:1; color:var(--danger);}
   body:not(.editing) .rm, body:not(.editing) .add-item{display:none;}
   body.editing .node-card button.node{box-shadow:0 0 0 1px var(--lc) inset;}
+  /* painel "Estrutura do documento" */
+  .est-sec{margin-bottom:1.5rem;}
+  .est-item{border-top:1px solid var(--border); padding-top:.7rem;}
+  .est-sec [contenteditable="true"]:empty{display:inline-block; min-width:4rem; min-height:1em;}
 
   /* ---------- responsivo ---------- */
   @media (max-width:860px){
@@ -354,6 +358,7 @@ let currentView = SEED.modelo.vistas[0].id; // a primeira vista de modelo.vistas
 let openBlocoIndex = null;
 let drawerOpenerEl = null; // elemento que tinha o foco antes de abrir o drawer (ver closeDrawer)
 let openSistemaId = null;
+let estruturaAberta = false; // o drawer mostra o painel "Estrutura do documento"
 let db = null, dbMode = null, downloadsCap = null;
 
 /* ---------- utilidades de caminho ---------- */
@@ -608,6 +613,7 @@ function catTagInfo(grupo) {
 function renderDrawer() {
   if (openBlocoIndex != null) return renderBlocoDrawerContent();
   if (openSistemaId != null) return renderSistemaDrawerContent();
+  if (estruturaAberta) return renderEstruturaContent();
 }
 function renderBlocoDrawerContent() {
   const b = state.blocos[openBlocoIndex];
@@ -678,16 +684,57 @@ function renderSistemaDrawerContent() {
   }
   document.getElementById("drawer-foot").replaceChildren();
 }
+/* ---------- painel "Estrutura do documento" (só em modo de edição) ----------
+   Tabela declarativa: cada seção aponta para um objeto (base) ou uma lista do
+   estado e diz quais campos de TEXTO expõe; só aparecem os campos que o item
+   tem. Cada campo é um editableSpan com data-path "meta.…"/"modelo.…", e o
+   commitField manda esses caminhos pelo portão tentarEstado(). */
+const ESTRUTURA = [
+  { titulo: "Identidade", base: "meta", campos: [["titulo", "Título"], ["icone", "Ícone (favicon)"], ["subtitulo", "Descrição"]] },
+  { titulo: "Vistas (menu e telas)", lista: "modelo.vistas", campos: [["rotulo", "Rótulo do menu"], ["icone", "Ícone"], ["titulo", "Título da tela"], ["intro", "Introdução"]] },
+  { titulo: "Grupos (raias)", lista: "modelo.grupos", campos: [["etiqueta", "Etiqueta"], ["nome", "Nome da raia"], ["subtitulo", "Subtítulo da raia"]] },
+  { titulo: "Sistemas de contexto", lista: "modelo.sistemas", campos: [["nome", "Nome"], ["desc", "Descrição"]] },
+  { titulo: "Ecossistema", base: "modelo.ecossistema", campos: [["nucleo", "Núcleo"], ["nota", "Nota"], ["semItem", "Texto sem item"], ["dicaChip", "Dica dos anéis"]] },
+];
+function renderEstruturaContent() {
+  const tag = document.getElementById("drawer-tag");
+  tag.textContent = "Estrutura"; tag.style.background = "var(--surface-2)"; tag.style.color = "var(--ink-soft)";
+  const nameEl = document.getElementById("drawer-name");
+  nameEl.textContent = "Estrutura do documento";
+  nameEl.removeAttribute("contenteditable");
+  nameEl.removeAttribute("data-path");
+  const body = document.getElementById("drawer-body");
+  body.replaceChildren();
+  const linhas = (obj, base, campos) => campos.filter(([k]) => typeof obj[k] === "string").flatMap(([k, rot]) => [
+    el("span", { class: "panel-label" }, rot),
+    el("p", { class: "drawer-lede" }, editableSpan("text", `${base}.${k}`, obj[k])),
+  ]);
+  ESTRUTURA.forEach(sec => {
+    const bloco = el("div", { class: "est-sec" }, el("h3", { class: "panel-label" }, sec.titulo));
+    if (sec.base) bloco.append(...linhas(getPath(state, sec.base), sec.base, sec.campos));
+    else getPath(state, sec.lista).forEach((item, i) =>
+      bloco.appendChild(el("div", { class: "est-item" }, [el("span", { class: "sis-tag" }, item.id), ...linhas(item, `${sec.lista}.${i}`, sec.campos)])));
+    body.appendChild(bloco);
+  });
+  document.getElementById("drawer-foot").replaceChildren();
+}
+function openEstrutura() {
+  drawerOpenerEl = document.activeElement;
+  estruturaAberta = true; openBlocoIndex = null; openSistemaId = null;
+  renderDrawer();
+  document.body.classList.add("panel-open", "drawer-open");
+  focusLater("#drawer-close");
+}
 function openDrawer(i) {
   drawerOpenerEl = document.activeElement;
-  openBlocoIndex = i; openSistemaId = null;
+  openBlocoIndex = i; openSistemaId = null; estruturaAberta = false;
   renderDrawer();
   document.body.classList.add("panel-open", "drawer-open");
   focusLater("#drawer-close");
 }
 function openSistemaDrawer(id) {
   drawerOpenerEl = document.activeElement;
-  openSistemaId = id; openBlocoIndex = null;
+  openSistemaId = id; openBlocoIndex = null; estruturaAberta = false;
   renderDrawer();
   document.body.classList.add("panel-open", "drawer-open");
   focusLater("#drawer-close");
@@ -696,7 +743,7 @@ function closeDrawer() {
   const wasOpen = document.body.classList.contains("drawer-open");
   document.body.classList.remove("drawer-open");
   if (!document.body.classList.contains("nav-open")) document.body.classList.remove("panel-open");
-  openBlocoIndex = null; openSistemaId = null;
+  openBlocoIndex = null; openSistemaId = null; estruturaAberta = false;
   document.getElementById("drawer-body").replaceChildren();
   document.getElementById("drawer-foot").replaceChildren();
   // devolve o foco pra quem abriu o drawer (o card ou item de sistema
@@ -937,10 +984,30 @@ function rerenderForPath(path) {
 }
 
 /* ---------- edição: eventos ---------- */
+// Portão de toda edição ESTRUTURAL (identidade, modelo, vistas): a mudança é
+// aplicada num clone do estado e só vira o estado se validShape() — as mesmas
+// regras de um arquivo importado — aceitar o resultado. Recusada, nada muda.
+function tentarEstado(mutar) {
+  const cand = JSON.parse(JSON.stringify(state));
+  mutar(cand);
+  if (!validShape(cand)) return false;
+  state = cand;
+  scheduleSave();
+  renderAll();
+  return true;
+}
 function commitField(t) {
   const path = t.getAttribute("data-path");
   if (!path) return;
   const raw = t.textContent.replace(/\s+/g, " ").trim();
+  if (/^(meta|modelo)\./.test(path)) {
+    if (raw === getPath(state, path)) return; // nada mudou: não reconstrói a casca à toa
+    if (!tentarEstado(c => setPath(c, path, raw))) {
+      t.textContent = getPath(state, path); // restaura o texto anterior
+      setStatus("Alteração recusada: o resultado não seria um documento válido (ex.: texto vazio).");
+    }
+    return;
+  }
   if (t.getAttribute("data-parse") === "elos") {
     const arr = parseElosText(raw);
     setPath(state, path, arr);
@@ -1128,6 +1195,7 @@ document.addEventListener("click", e => {
 
   const editToggle = e.target.closest("#edit-toggle");
   if (editToggle) { setEditing(!editing); return; }
+  if (e.target.closest("#estrutura-btn")) { openEstrutura(); return; }
   const exportBtn = e.target.closest("#export-btn");
   if (exportBtn) { doExport(); return; }
   const importBtn = e.target.closest("#import-btn");
@@ -1180,6 +1248,7 @@ document.addEventListener("input", e => { if (e.target.id === "search") { filter
 function setEditing(v) {
   editing = v;
   document.body.classList.toggle("editing", v);
+  if (!v && estruturaAberta) closeDrawer(); // o painel de estrutura só existe em modo de edição
   renderAll();
   updateEditControls();
 }
@@ -1188,6 +1257,7 @@ function updateEditControls() {
   const extra = document.getElementById("edit-extra");
   extra.replaceChildren();
   if (editing) {
+    extra.appendChild(el("button", { class: "link-btn", type: "button", id: "estrutura-btn" }, "Estrutura do documento"));
     extra.appendChild(el("button", { class: "link-btn", type: "button", id: "export-btn" }, "Exportar dados (JSON)"));
     extra.appendChild(el("button", { class: "link-btn", type: "button", id: "import-btn" }, "Importar dados (JSON)"));
     extra.appendChild(el("button", { class: "link-btn", type: "button", id: "reset-btn" }, "Restaurar conteúdo original"));
@@ -1233,6 +1303,7 @@ function doReset() {
   if (!confirm("Restaurar todo o conteúdo para a versão original? Isso substitui as edições atuais.")) return;
   undoSnapshot = JSON.stringify(state);
   state = cloneSeed();
+  closeDrawer(); // o que o drawer mostrava (bloco, painel de estrutura) vem do estado antigo
   SIGLA_RE = null; // siglas.json da seed pode ter um conjunto diferente do estado atual
   scheduleSave();
   renderAll();
